@@ -25,6 +25,7 @@ class NewAgent(Agent):
         remaining_targets = [bid for bid in my_targets if bid in balls and balls[bid].state.s != 4]
         if len(remaining_targets) == 0:
             remaining_targets = ["8"]
+        self._remaining_count = len(remaining_targets)
 
         cue_pos = self._xy(balls["cue"].state.rvw[0])
         ball_r = self._get_ball_radius(balls["cue"])
@@ -143,14 +144,24 @@ class NewAgent(Agent):
         return True
 
     def _pick_speed(self, d_cue_to_obj, d_obj_to_pocket, cut_angle_deg):
-        base = 1.0 + 1.25 * d_cue_to_obj + 0.85 * d_obj_to_pocket
-        base *= 1.0 + 0.008 * cut_angle_deg
-        return float(np.clip(base, 0.8, 6.8))
+        remaining = getattr(self, "_remaining_count", 7)
+        base = 0.9 + 1.0 * d_cue_to_obj + 0.75 * d_obj_to_pocket
+        base *= 1.0 + 0.004 * cut_angle_deg
+        if remaining <= 2:
+            base *= 1.1
+        else:
+            base *= 0.95
+        return float(np.clip(base, 0.8, 5.2))
 
     def _rank_score(self, d_cue_to_obj, d_obj_to_pocket, cut_angle_deg):
-        return -1.2 * d_cue_to_obj - 1.0 * d_obj_to_pocket - 0.06 * cut_angle_deg
+        remaining = getattr(self, "_remaining_count", 7)
+        angle_penalty = 0.10 * cut_angle_deg
+        if remaining <= 2:
+            angle_penalty = 0.13 * cut_angle_deg
+        return -1.1 * d_cue_to_obj - 1.3 * d_obj_to_pocket - angle_penalty
 
     def _scratch_risk_penalty(self, cue_pos, aim_dir, table, ball_r):
+        remaining = getattr(self, "_remaining_count", 7)
         penalty = 0.0
         for p in table.pockets.values():
             pocket = self._xy(p.center)
@@ -159,8 +170,11 @@ class NewAgent(Agent):
             if along <= 0:
                 continue
             lateral = float(np.linalg.norm(ap - along * aim_dir))
-            if lateral < 2.2 * ball_r and along < 0.7:
-                penalty += 1.5
+            if lateral < 2.4 * ball_r and along < 0.8:
+                if remaining > 3:
+                    penalty += 2.0
+                else:
+                    penalty += 1.2
         return penalty
 
     def _safety_shot(self, cue_pos, remaining_targets, balls, table, ball_r):
