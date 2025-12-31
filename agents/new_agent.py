@@ -1,5 +1,9 @@
+import copy
 import math
+import random
+
 import numpy as np
+import pooltool as pt
 
 from .agent import Agent
 
@@ -9,6 +13,9 @@ class NewAgent(Agent):
     def __init__(self):
         super().__init__()
         self._default_ball_radius = 0.028575
+        self._sim_noise = {"V0": 0.1, "phi": 0.2, "theta": 0.1, "a": 0.003, "b": 0.003}
+        self._max_candidates = 24
+        self._simulations = 4
     
     def decision(self, balls=None, my_targets=None, table=None):
         """决策方法
@@ -32,6 +39,8 @@ class NewAgent(Agent):
         pocket_centers = [self._xy(p.center) for p in table.pockets.values()]
 
         candidates = []
+        angle_jitter = [0.0, 0.4, -0.4]
+        speed_scales = [0.9, 1.0, 1.15]
         for target_id in remaining_targets:
             if target_id not in balls or balls[target_id].state.s == 4:
                 continue
@@ -66,16 +75,28 @@ class NewAgent(Agent):
                 cut_cos = float(np.clip(np.dot(cue_to_obj_dir, to_pocket_dir), -1.0, 1.0))
                 cut_angle = float(math.degrees(math.acos(cut_cos)))
 
-                v0 = self._pick_speed(cue_to_obj_dist, float(to_pocket_norm), cut_angle)
                 base_score = self._rank_score(cue_to_obj_dist, float(to_pocket_norm), cut_angle)
                 scratch_penalty = self._scratch_risk_penalty(cue_pos, aim_dir, table, ball_r)
                 score = base_score - scratch_penalty
 
-                candidates.append((score, {'V0': v0, 'phi': phi, 'theta': 0.0, 'a': 0.0, 'b': 0.0}))
+                base_v0 = self._pick_speed(cue_to_obj_dist, float(to_pocket_norm), cut_angle)
+                for delta in angle_jitter:
+                    for scale in speed_scales:
+                        adj_phi = (phi + delta) % 360.0
+                        v0 = float(np.clip(base_v0 * scale, 0.8, 5.6))
+                        candidates.append(
+                            (
+                                score,
+                                {"V0": v0, "phi": adj_phi, "theta": 0.0, "a": 0.0, "b": 0.0},
+                            )
+                        )
 
         if candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
-            return candidates[0][1]
+            top = candidates[: self._max_candidates]
+            best = self._simulate_pick(balls, table, remaining_targets, top)
+            if best is not None:
+                return best
 
         safety = self._safety_shot(cue_pos, remaining_targets, balls, table, ball_r)
         return safety
@@ -145,13 +166,13 @@ class NewAgent(Agent):
 
     def _pick_speed(self, d_cue_to_obj, d_obj_to_pocket, cut_angle_deg):
         remaining = getattr(self, "_remaining_count", 7)
-        base = 0.9 + 1.0 * d_cue_to_obj + 0.75 * d_obj_to_pocket
+        base = 1.0 + 1.05 * d_cue_to_obj + 0.85 * d_obj_to_pocket
         base *= 1.0 + 0.004 * cut_angle_deg
         if remaining <= 2:
             base *= 1.1
         else:
             base *= 0.95
-        return float(np.clip(base, 0.8, 5.2))
+        return float(np.clip(base, 0.8, 5.6))
 
     def _rank_score(self, d_cue_to_obj, d_obj_to_pocket, cut_angle_deg):
         remaining = getattr(self, "_remaining_count", 7)
@@ -199,3 +220,145 @@ class NewAgent(Agent):
         if best is not None:
             return best[1]
         return {'V0': 1.2, 'phi': 0.0, 'theta': 0.0, 'a': 0.0, 'b': 0.0}
+
+    def _simulate_action(self, balls, table, action):
+        sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        sim_table = copy.deepcopy(table)
+        cue = pt.Cue(cue_ball_id="cue")
+        shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+
+        def _n(val, key, lo, hi):
+            std = float(self._sim_noise.get(key, 0.0))
+            val = val + random.gauss(0.0, std)
+            return float(np.clip(val, lo, hi))
+
+        try:
+            V0 = _n(action["V0"], "V0", 0.5, 8.0)
+            phi = _n(action["phi"], "phi", -1e9, 1e9) % 360.0
+            theta = _n(action["theta"], "theta", 0.0, 90.0)
+            a = _n(action["a"], "a", -0.5, 0.5)
+            b = _n(action["b"], "b", -0.5, 0.5)
+            cue.set_state(V0=V0, phi=phi, theta=theta, a=a, b=b)
+            pt.simulate(shot, inplace=True)
+            return shot
+        except Exception:
+            return None
+
+    def _analyze_shot_for_reward(self, shot, last_state, player_targets):
+        new_pocketed = [
+            bid
+            for bid, ball in shot.balls.items()
+            if ball.state.s == 4 and last_state[bid].state.s != 4
+        ]
+
+        own_pocketed = [bid for bid in new_pocketed if bid in player_targets]
+        enemy_pocketed = [
+            bid for bid in new_pocketed if bid not in player_targets and bid not in ["cue", "8"]
+        ]
+
+        cue_pocketed = "cue" in new_pocketed
+        eight_pocketed = "8" in new_pocketed
+
+        first_contact_ball_id = None
+        foul_first_hit = False
+        valid_ball_ids = {
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15",
+        }
+
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, "ids") else []
+            if ("cushion" not in et) and ("pocket" not in et) and ("cue" in ids):
+                other_ids = [i for i in ids if i != "cue" and i in valid_ball_ids]
+                if other_ids:
+                    first_contact_ball_id = other_ids[0]
+                    break
+
+        if first_contact_ball_id is None:
+            if len(last_state) > 2 or player_targets != ["8"]:
+                foul_first_hit = True
+        else:
+            if first_contact_ball_id not in player_targets:
+                foul_first_hit = True
+
+        cue_hit_cushion = False
+        target_hit_cushion = False
+        foul_no_rail = False
+
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, "ids") else []
+            if "cushion" in et:
+                if "cue" in ids:
+                    cue_hit_cushion = True
+                if first_contact_ball_id is not None and first_contact_ball_id in ids:
+                    target_hit_cushion = True
+
+        if (
+            len(new_pocketed) == 0
+            and first_contact_ball_id is not None
+            and (not cue_hit_cushion)
+            and (not target_hit_cushion)
+        ):
+            foul_no_rail = True
+
+        score = 0
+        if cue_pocketed and eight_pocketed:
+            score -= 150
+        elif cue_pocketed:
+            score -= 100
+        elif eight_pocketed:
+            if player_targets == ["8"]:
+                score += 100
+            else:
+                score -= 150
+
+        if foul_first_hit:
+            score -= 30
+        if foul_no_rail:
+            score -= 30
+
+        score += len(own_pocketed) * 50
+        score -= len(enemy_pocketed) * 20
+
+        if score == 0 and not cue_pocketed and not eight_pocketed and not foul_first_hit and not foul_no_rail:
+            score = 10
+
+        return score
+
+    def _simulate_pick(self, balls, table, remaining_targets, candidates):
+        last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        best_action = None
+        best_score = -1e9
+
+        for _, action in candidates:
+            total = 0.0
+            n_ok = 0
+            for _ in range(max(1, self._simulations)):
+                shot = self._simulate_action(balls, table, action)
+                if shot is None:
+                    continue
+                total += self._analyze_shot_for_reward(shot, last_state_snapshot, remaining_targets)
+                n_ok += 1
+            avg = total / n_ok if n_ok else -500.0
+            if avg > best_score:
+                best_score = avg
+                best_action = action
+            if best_score >= 120:
+                break
+
+        return best_action
