@@ -1,4 +1,4 @@
-import copy
+﻿import copy
 import math
 import random
 
@@ -8,21 +8,21 @@ import pooltool as pt
 from .agent import Agent
 
 class NewAgent(Agent):
-    """自定义 Agent"""
-    
+    """自定义Agent"""
+
     def __init__(self):
         super().__init__()
         self._default_ball_radius = 0.028575
         self._sim_noise = {"V0": 0.1, "phi": 0.2, "theta": 0.1, "a": 0.003, "b": 0.003}
         self._max_candidates = 24
         self._simulations = 4
-    
+
     def decision(self, balls=None, my_targets=None, table=None):
         """决策方法
-        
+
         参数：
             observation: (balls, my_targets, table)
-        
+
         返回：
             dict: {'V0', 'phi', 'theta', 'a', 'b'}
         """
@@ -98,8 +98,13 @@ class NewAgent(Agent):
             if best is not None:
                 return best
 
-        safety = self._safety_shot(cue_pos, remaining_targets, balls, table, ball_r)
-        return safety
+        safety_candidates = self._rail_safety_candidates(cue_pos, remaining_targets, balls, ball_r)
+        if safety_candidates:
+            best = self._simulate_pick(balls, table, remaining_targets, safety_candidates)
+            if best is not None:
+                return best
+
+        return self._safety_shot(cue_pos, remaining_targets, balls, table, ball_r)
 
     def _xy(self, v):
         v = np.asarray(v, dtype=float)
@@ -212,14 +217,44 @@ class NewAgent(Agent):
             if self._is_first_contact_likely(cue_pos, dir2, dist, tid, balls, ball_r) is False:
                 continue
             phi = float(math.degrees(math.atan2(dir2[1], dir2[0])) % 360.0)
-            v0 = float(np.clip(0.9 + 0.6 * dist, 0.8, 2.6))
+            v0 = float(np.clip(1.0 + 0.7 * dist, 0.9, 3.2))
             score = -dist - 0.1 * self._scratch_risk_penalty(cue_pos, dir2, table, ball_r)
-            cand = (score, {'V0': v0, 'phi': phi, 'theta': 0.0, 'a': 0.0, 'b': 0.0})
+            cand = (score, {"V0": v0, "phi": phi, "theta": 0.0, "a": 0.0, "b": 0.0})
             if best is None or cand[0] > best[0]:
                 best = cand
         if best is not None:
             return best[1]
-        return {'V0': 1.2, 'phi': 0.0, 'theta': 0.0, 'a': 0.0, 'b': 0.0}
+        return {"V0": 1.2, "phi": 0.0, "theta": 0.0, "a": 0.0, "b": 0.0}
+
+    def _rail_safety_candidates(self, cue_pos, remaining_targets, balls, ball_r):
+        candidates = []
+        angle_jitter = [0.0, 0.5, -0.5]
+        speed_scales = [1.0, 1.3]
+        for tid in remaining_targets:
+            if tid not in balls or balls[tid].state.s == 4:
+                continue
+            tpos = self._xy(balls[tid].state.rvw[0])
+            vec = tpos - cue_pos
+            dist = float(np.linalg.norm(vec))
+            if dist < 1e-6:
+                continue
+            dir2 = vec / dist
+            if self._is_first_contact_likely(cue_pos, dir2, dist, tid, balls, ball_r) is False:
+                continue
+            phi_base = float(math.degrees(math.atan2(dir2[1], dir2[0])) % 360.0)
+            base_v0 = float(np.clip(1.2 + 1.1 * dist, 1.2, 6.5))
+            base_score = -dist
+            for delta in angle_jitter:
+                for scale in speed_scales:
+                    phi = (phi_base + delta) % 360.0
+                    v0 = float(np.clip(base_v0 * scale, 1.2, 7.0))
+                    candidates.append(
+                        (
+                            base_score,
+                            {"V0": v0, "phi": phi, "theta": 0.0, "a": 0.0, "b": 0.0},
+                        )
+                    )
+        return candidates
 
     def _simulate_action(self, balls, table, action):
         sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
@@ -330,7 +365,7 @@ class NewAgent(Agent):
         if foul_first_hit:
             score -= 30
         if foul_no_rail:
-            score -= 30
+            score -= 60
 
         score += len(own_pocketed) * 50
         score -= len(enemy_pocketed) * 20
