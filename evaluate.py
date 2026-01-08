@@ -18,7 +18,7 @@ import os
 # 导入必要的模块
 from utils import set_random_seed
 from poolenv import PoolEnv
-from agents import BasicAgent, BasicAgentPro, NewAgent
+from agents import BasicAgent, BasicAgentPro, NewAgent, NewAgent1
 # === Shot logger (optional) ===
 ENABLE_SHOT_LOGGER = True
 if ENABLE_SHOT_LOGGER:
@@ -30,20 +30,36 @@ set_random_seed(enable=False, seed=42)
 
 env = PoolEnv()
 results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
-logger = (
-    ShotLogger(out_dir=os.path.join(os.path.dirname(__file__), "logs"))
-    if ENABLE_SHOT_LOGGER
-    else None
-)
+
+def _agent_tag(agent):
+    name = agent.__class__.__name__
+    if name == "BasicAgent":
+        return "BA"
+    if name == "BasicAgentPro":
+        return "BApro"
+    return name
+
 
 n_games = 120  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
 
 ## 选择对打的对手
-agent_a, agent_b = BasicAgent(), NewAgent() # 与 BasicAgent 对打
+# agent_a, agent_b = BasicAgent(), NewAgent() # 与 BasicAgent 对打
 # agent_a, agent_b = BasicAgentPro(), NewAgent() # 与 BasicAgentPro 对打
+# agent_a, agent_b = BasicAgent(), BasicAgentPro() # 测试用，两个 BasicAgent 对打
+agent_a, agent_b = BasicAgent(), NewAgent1() # 评测时使用该配置
 
 players = [agent_a, agent_b]  # 用于切换先后手
 target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型
+
+logger = (
+    ShotLogger(
+        out_dir=os.path.join(os.path.dirname(__file__), "logs"),
+        agent_a_tag=_agent_tag(agent_a),
+        agent_b_tag=_agent_tag(agent_b),
+    )
+    if ENABLE_SHOT_LOGGER
+    else None
+)
 
 for i in range(n_games): 
     print()
@@ -101,6 +117,14 @@ for i in range(n_games):
 results['AGENT_A_SCORE'] = results['AGENT_A_WIN'] * 1 + results['SAME'] * 0.5
 results['AGENT_B_SCORE'] = results['AGENT_B_WIN'] * 1 + results['SAME'] * 0.5
 
+# 计算胜率
+b_rate = 100.0 * results['AGENT_B_WIN'] / float(n_games)
+
+
 print("\n最终结果：", results)
+print(f"NewAgent胜率：{b_rate:.2f}%")
+
+
 if logger is not None:
+    logger.finalize(results, n_games)
     logger.close()
