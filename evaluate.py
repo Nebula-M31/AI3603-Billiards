@@ -14,6 +14,8 @@ evaluate.py - Agent 评估脚本
 """
 
 import os
+import json
+import time
 
 # 导入必要的模块
 from utils import set_random_seed
@@ -31,6 +33,9 @@ set_random_seed(enable=False, seed=42)
 env = PoolEnv()
 results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
 
+game_timings = []
+all_start = time.perf_counter()
+
 def _agent_tag(agent):
     name = agent.__class__.__name__
     if name == "BasicAgent":
@@ -43,10 +48,12 @@ def _agent_tag(agent):
 n_games = 120  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
 
 ## 选择对打的对手
-# agent_a, agent_b = BasicAgent(), NewAgent() # 与 BasicAgent 对打
+agent_a, agent_b = BasicAgent(), NewAgent() # 与 BasicAgent 对打
 # agent_a, agent_b = BasicAgentPro(), NewAgent() # 与 BasicAgentPro 对打
 # agent_a, agent_b = BasicAgent(), BasicAgentPro() # 测试用，两个 BasicAgent 对打
-agent_a, agent_b = BasicAgent(), NewAgent1() # 评测时使用该配置
+## NewAgent1 评测配置
+# agent_a, agent_b = BasicAgent(), NewAgent1() # 与 BasicAgent 对打
+# agent_a, agent_b = BasicAgentPro(), NewAgent1() # 与 BasicAgentPro 对打
 
 players = [agent_a, agent_b]  # 用于切换先后手
 target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型
@@ -68,6 +75,7 @@ for i in range(n_games):
     player_class = players[i % 2].__class__.__name__
     ball_type = target_ball_choice[i % 4]
     print(f"本局 Player A: {player_class}, 目标球型: {ball_type}")
+    game_start = time.perf_counter()
     while True:
         player = env.get_curr_player()
         print(f"[第{env.hit_count}次击球] player: {player}")
@@ -105,6 +113,9 @@ for i in range(n_games):
                 print(f"对方球入袋：{step_info['ENEMY_INTO_POCKET']}")
         if done:
             # 统计结果（player A/B 转换为 agent A/B）
+            game_time = time.perf_counter() - game_start
+            game_timings.append({"game_idx": i, "seconds": game_time})
+
             if info['winner'] == 'SAME':
                 results['SAME'] += 1
             elif info['winner'] == 'A':
@@ -123,6 +134,30 @@ b_rate = 100.0 * results['AGENT_B_WIN'] / float(n_games)
 
 print("\n最终结果：", results)
 print(f"NewAgent胜率：{b_rate:.2f}%")
+
+if game_timings:
+    total_time = time.perf_counter() - all_start
+    avg_time = total_time / float(len(game_timings))
+    max_time = max(t["seconds"] for t in game_timings)
+    print(f"总耗时：{total_time:.2f}s，平均每局：{avg_time:.2f}s，最长：{max_time:.2f}s")
+    timing_path = os.path.join(
+        os.path.dirname(__file__),
+        "logs",
+        f"timing_{_agent_tag(agent_a)}_vs_{_agent_tag(agent_b)}.json",
+    )
+    with open(timing_path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "n_games": n_games,
+                "total_seconds": total_time,
+                "avg_seconds": avg_time,
+                "max_seconds": max_time,
+                "per_game": game_timings,
+            },
+            fh,
+            ensure_ascii=True,
+            indent=2,
+        )
 
 
 if logger is not None:
